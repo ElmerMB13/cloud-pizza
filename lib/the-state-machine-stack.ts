@@ -11,6 +11,19 @@ export class TheStateMachineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props)
 
+    const pineappleCheckLambda = new lambda.Function(this, 'pineappleCheckLambdaHandler', {
+      runtime: lambda.Runtime.NODEJS_14_X,
+      handler: 'orderPizza.handler',
+      code: lambda.Code.fromAsset('lambda-fns'),
+    });
+
+    const orderPizza = new tasks.LambdaInvoke(this, "Order Pizza Job", {
+      lambdaFunction: pineappleCheckLambda,
+      inputPath: '$.flavour',
+      resultPath: '$.pineappleAnalysis',
+      payloadResponseOnly: true
+    })
+
     const createPizzaLambda = new lambda.Function(this, 'createPizzaLambda', {
       runtime: lambda.Runtime.NODEJS_14_X,
       handler: 'createPizza.handler',
@@ -19,6 +32,7 @@ export class TheStateMachineStack extends cdk.Stack {
 
     const createPizza = new tasks.LambdaInvoke(this, "Create Pizza Job", {
       lambdaFunction: createPizzaLambda,
+      inputPath: '$.throwCreateError',
       resultPath: '$.createPizza',
       payloadResponseOnly: true,
     })
@@ -31,6 +45,7 @@ export class TheStateMachineStack extends cdk.Stack {
 
     const deliveryPizza = new tasks.LambdaInvoke(this, "Delivery Pizza Job", {
       lambdaFunction: deliveryLambda,
+      inputPath: '$.throwDeliveryError',
       resultPath: '$.deliveryPizza',
       payloadResponseOnly: true,
     })
@@ -41,9 +56,9 @@ export class TheStateMachineStack extends cdk.Stack {
       code: lambda.Code.fromAsset('lambda-fns'),
     })
 
-    const errorCreatingDeliveringPizza = new sfn.Fail(this, 'CreateDeliverPizzaJobFailed', {
-      cause: 'Not enough ingredients or far destination.',
-      error: 'Failed to make or deliver the pizza.',
+    const pineappleDetected = new sfn.Fail(this, 'Sorry, We Dont add Pineapple', {
+      cause: 'They asked for Pineapple',
+      error: 'Failed To Make Pizza',
     })
 
     const supportNotification = new tasks.LambdaInvoke(this, "Support notification Job", {
@@ -51,13 +66,19 @@ export class TheStateMachineStack extends cdk.Stack {
       inputPath: '$',
       resultPath: '$.supportNotification',
       payloadResponseOnly: true,
-    }).next(errorCreatingDeliveringPizza)
+    })
 
-    createPizza.addCatch(supportNotification)
-    deliveryPizza.addCatch(supportNotification)
+    createPizza.addCatch(sfn.Chain.start(supportNotification), { errors: ['States.All'] })
+    deliveryPizza.addCatch(sfn.Chain.start(supportNotification), { errors: ['States.All'] })
 
     const definition = sfn.Chain
-      .start(createPizza)
+      .start(orderPizza)
+      .next(new sfn.Choice(this, 'With Pineapple?') // Logical choice added to flow
+        // Look at the "status" field
+        .when(sfn.Condition.booleanEquals('$.pineappleAnalysis.containsPineapple', true), pineappleDetected) // Fail for pineapple
+        .otherwise(createPizza)
+        .afterwards()
+      )
       .next(deliveryPizza)
 
     const stateMachine = new sfn.StateMachine(this, 'StateMachine', {
